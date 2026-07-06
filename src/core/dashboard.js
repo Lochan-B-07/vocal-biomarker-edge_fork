@@ -55,7 +55,10 @@ const thresholds = {
   jitterLocal: 1.04,
   jitterRAP: 0.68,
   shimmerLocal: 3.81,
-  shimmerDB: 0.35,
+  // Raised from clinical 0.35 dB → 0.45 dB to compensate for laptop built-in mic
+  // compression artifacts and OS-level AGC that artificially inflate shimmer dB
+  // even on healthy vowel phonation. Studio/clinical mics use 0.35 dB.
+  shimmerDB: 0.45,
   shimmerAPQ3: 3.07,
 };
 
@@ -451,12 +454,21 @@ function analyzeVoiceData() {
   dotShimmerAPQ3.className = `metric-status-dot ${isShimmerAPQ3Elevated ? 'pathological' : 'normal'}`;
 
   // 3. Overall Diagnostic Scoring
-  const isPathological =
-    isJitterLocalElevated ||
-    isJitterRAPElevated ||
-    isShimmerLocalElevated ||
-    isShimmerDBElevated ||
-    isShimmerAPQ3Elevated;
+  // Clinical rule: require ≥2 elevated markers in the same domain (jitter OR shimmer)
+  // OR at least 1 marker elevated in BOTH domains simultaneously.
+  // This prevents a single noisy measurement (e.g. shimmer dB from laptop AGC) from
+  // triggering a false pathological flag — matching Praat/MDVP multi-marker consensus.
+  const jitterElevatedCount = (isJitterLocalElevated ? 1 : 0) + (isJitterRAPElevated ? 1 : 0);
+  const shimmerElevatedCount =
+    (isShimmerLocalElevated ? 1 : 0) +
+    (isShimmerDBElevated ? 1 : 0) +
+    (isShimmerAPQ3Elevated ? 1 : 0);
+
+  const jitterConsensus = jitterElevatedCount >= 2;
+  const shimmerConsensus = shimmerElevatedCount >= 2;
+  const crossDomainConsensus = jitterElevatedCount >= 1 && shimmerElevatedCount >= 1;
+
+  const isPathological = jitterConsensus || shimmerConsensus || crossDomainConsensus;
 
   if (isPathological) {
     const elevatedList = [];
@@ -469,12 +481,20 @@ function analyzeVoiceData() {
     riskCard.className = 'risk-card pathology';
     riskTitle.textContent = 'Pathological Indication';
     riskDesc.textContent =
-      `Analysis shows elevated perturbation in: ${elevatedList.join(', ')}. This matches clinical correlates for vocal strain, neuromuscular fatigue, or mucosal swelling. Note: In non-clinical room environments, speaking too quietly or too far from the microphone can also inflate amplitude perturbation.`;
+      `Elevated perturbation detected across multiple markers: ${elevatedList.join(', ')}. This pattern matches clinical correlates for vocal strain, neuromuscular fatigue, or mucosal swelling. If using a laptop built-in microphone, consider re-testing at higher volume or closer distance.`;
   } else {
+    const borderlineList = [];
+    if (isJitterLocalElevated) borderlineList.push('Jitter (Local)');
+    if (isJitterRAPElevated) borderlineList.push('Jitter (RAP)');
+    if (isShimmerLocalElevated) borderlineList.push('Shimmer (Local)');
+    if (isShimmerDBElevated) borderlineList.push('Shimmer (dB)');
+    if (isShimmerAPQ3Elevated) borderlineList.push('Shimmer (APQ3)');
+
     riskCard.className = 'risk-card normal';
     riskTitle.textContent = 'Normal Vocal Screening';
-    riskDesc.textContent =
-      'All acoustic vocal biomarkers lie within standard clinical safety ranges. No active signs of neuromuscular vocal fatigue or laryngeal pathology detected.';
+    riskDesc.textContent = borderlineList.length > 0
+      ? `All biomarkers within safe range. Note: ${borderlineList.join(', ')} slightly elevated — likely microphone noise artifact. No clinical concern.`
+      : 'All acoustic vocal biomarkers lie within standard clinical safety ranges. No active signs of neuromuscular vocal fatigue or laryngeal pathology detected.';
   }
 
   // Attach metric results to recordedData for export

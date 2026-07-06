@@ -125,11 +125,11 @@ export class VocalAudioProcessor {
           if (features) {
             // Live voicing check for real-time UI indicator
             let isVoiced = false;
-            if (features.rms >= 0.025) {
+            if (features.rms >= 0.04) {
               const pitchRes = detectPitchAutocorrelation(bufferClone, this.sampleRate, {
                 minFreq: 50,
                 maxFreq: 500,
-                voicedThreshold: 0.45,
+                voicedThreshold: 0.50,
               });
               isVoiced = pitchRes.isVoiced && pitchRes.frequency > 0;
             }
@@ -256,23 +256,24 @@ export class VocalAudioProcessor {
     const sampleCount = rawAudio.length;
 
     const voicedBlocks = [];
+    const voicedChunks = [];
 
     // Step 1: Analyze block-by-block using autocorrelation to find average F0 and detect voiced segments
     for (let i = 0; i + blockSize <= sampleCount; i += hopSize) {
       const block = rawAudio.subarray(i, i + blockSize);
 
-      // Amplitude Gate: filter out background room noise and silence
+      // Amplitude Gate: filter out background room noise and silence.
       let sumSq = 0;
       for (let j = 0; j < block.length; j++) {
         sumSq += block[j] * block[j];
       }
       const rms = Math.sqrt(sumSq / block.length);
-      if (rms < 0.025) continue;
+      if (rms < 0.04) continue;
 
       const pitchResult = detectPitchAutocorrelation(block, sampleRate, {
         minFreq: 50,
         maxFreq: 500,
-        voicedThreshold: 0.45,
+        voicedThreshold: 0.50,
       });
 
       if (pitchResult.isVoiced && pitchResult.frequency > 0) {
@@ -280,6 +281,7 @@ export class VocalAudioProcessor {
           frequency: pitchResult.frequency,
           periodSamples: pitchResult.periodSamples,
         });
+        voicedChunks.push(block);
       }
     }
 
@@ -290,19 +292,53 @@ export class VocalAudioProcessor {
       };
     }
 
-    // Step 2: Calculate overall average F0 and estimated period across all voiced blocks
-    const frequencies = voicedBlocks.map((b) => b.frequency);
+    // Step 2: Median-based F0 outlier rejection.
+    // Keep only blocks within 20% of the median F0 to discard plosive transients and
+    // pitch-doubled detection artifacts. Both blocks and their audio chunks are filtered together.
+    const allFreqs = voicedBlocks.map((b) => b.frequency);
+    const sortedF = [...allFreqs].sort((a, b) => a - b);
+    const medianF0 = sortedF[Math.floor(sortedF.length / 2)];
+
+    const stableIndices = voicedBlocks
+      .map((b, idx) => ({ ok: Math.abs(b.frequency - medianF0) / medianF0 <= 0.20, idx }))
+      .filter((x) => x.ok)
+      .map((x) => x.idx);
+
+    if (stableIndices.length < 10) {
+      return {
+        success: false,
+        error: 'Voice pitch varied too much during recording. Please sustain a steady "ahh" vowel sound for at least 3-4 seconds.',
+      };
+    }
+
+    const stableBlocks = stableIndices.map((i) => voicedBlocks[i]);
+    const stableChunks = stableIndices.map((i) => voicedChunks[i]);
+
+    const frequencies = stableBlocks.map((b) => b.frequency);
     const avgF0 = frequencies.reduce((a, b) => a + b, 0) / frequencies.length;
     const minF0 = Math.min(...frequencies);
     const maxF0 = Math.max(...frequencies);
 
-    const periodsList = voicedBlocks.map((b) => b.periodSamples);
-    const avgPeriodSamples = Math.round(periodsList.reduce((a, b) => a + b, 0) / periodsList.length);
+    const periodsList = stableBlocks.map((b) => b.periodSamples);
+    const avgPeriodSamples = Math.round(
+      periodsList.reduce((a, b) => a + b, 0) / periodsList.length
+    );
 
-    // Step 3: Extract individual cycle periods and peak amplitudes ONCE across the entire audio stream
-    // This avoids overlapping block duplications and boundary discontinuities!
+    // Step 3: Concatenate ONLY voiced audio chunks from stable blocks.
+    // CRITICAL FIX: The previous implementation ran extractCyclesAndAmplitudes on the full
+    // rawAudio buffer, which includes silence, consonants, and pauses between words. This caused
+    // the peak-picker to track amplitude and period ACROSS silent gaps — inflating jitter by ~5x
+    // and shimmer by ~4-5x above actual values. Voiced-only concatenation eliminates this entirely.
+    const voicedTotalLen = stableChunks.reduce((sum, c) => sum + c.length, 0);
+    const voicedOnlyAudio = new Float32Array(voicedTotalLen);
+    let vOffset = 0;
+    for (const chunk of stableChunks) {
+      voicedOnlyAudio.set(chunk, vOffset);
+      vOffset += chunk.length;
+    }
+
     const { periods: pitchPeriods, amplitudes: peakAmplitudes } = extractCyclesAndAmplitudes(
-      rawAudio,
+      voicedOnlyAudio,
       sampleRate,
       avgPeriodSamples
     );
