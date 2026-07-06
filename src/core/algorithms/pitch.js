@@ -165,7 +165,7 @@ export function extractCyclesAndAmplitudes(buffer, sampleRate, estPeriodSamples)
 
   // Step 1: Find the first major peak in a voiced region as anchor point
   let startIdx = 0;
-  while (startIdx < length && Math.abs(buffer[startIdx]) < 0.025) {
+  while (startIdx < length && Math.abs(buffer[startIdx]) < 0.04) {
     startIdx++;
   }
 
@@ -189,8 +189,8 @@ export function extractCyclesAndAmplitudes(buffer, sampleRate, estPeriodSamples)
   let currentExactIdx = currentIdx + getSubSampleOffset(currentIdx);
 
   // Step 2: Track subsequent cycles by leaping by estPeriodSamples and searching locally
-  // Tighten tolerance to 8% to prevent jumping to secondary formant ripples
-  const tolerance = Math.max(2, Math.round(estPeriodSamples * 0.08));
+  // 15% tolerance: wide enough for laptop mic timing jitter, tight enough to avoid secondary formant ripples
+  const tolerance = Math.max(2, Math.round(estPeriodSamples * 0.15));
 
   while (currentIdx < length) {
     const nextTargetIdx = Math.round(currentExactIdx + estPeriodSamples);
@@ -217,7 +217,7 @@ export function extractCyclesAndAmplitudes(buffer, sampleRate, estPeriodSamples)
       }
     }
 
-    if (localPeakIdx !== -1 && localMaxAmp >= 0.025) {
+    if (localPeakIdx !== -1 && localMaxAmp >= 0.04) {
       const localExactIdx = localPeakIdx + getSubSampleOffset(localPeakIdx);
       const actualPeriod = localExactIdx - currentExactIdx;
 
